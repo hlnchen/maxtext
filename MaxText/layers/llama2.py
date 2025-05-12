@@ -154,14 +154,15 @@ class LlamaDecoderLayer(nn.Module):
     )
 
     # MLP block.
-    mlp_lnx = linears.MlpBlock(
+    mlp_lnx = linears.mlp_block(
+        config=cfg,
+        in_features=hidden_states.shape[-1],
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="mlp",
-        config=cfg,
         quant=self.quant,
     )(hidden_states, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))

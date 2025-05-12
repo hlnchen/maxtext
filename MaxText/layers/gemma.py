@@ -34,6 +34,7 @@ rms_norm = normalizations.rms_norm
 NdInitializer = initializers.NdInitializer
 Attention = attentions.Attention
 MlpBlock = linears.MlpBlock
+mlp_block = linears.mlp_block
 Config = common_types.Config
 AxisNames = common_types.AxisNames
 Mesh = common_types.Mesh
@@ -123,14 +124,15 @@ class GemmaDecoderLayer(nn.Module):
     )(attention_lnx)
 
     # MLP block.
-    mlp_lnx = MlpBlock(
+    mlp_lnx = mlp_block(
+        config=cfg,
+        in_features=attn_output.shape[-1],
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="mlp",
-        config=cfg,
         quant=self.quant,
     )(attn_output, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
