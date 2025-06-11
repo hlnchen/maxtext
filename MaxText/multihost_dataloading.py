@@ -213,6 +213,7 @@ class RemoteIterator:
         return jax.device_put(array, sharding)
       except Exception as e:  # pylint: disable=broad-exception-caught
         max_logging.log(f"Error putting data to TPU device path{path}, exception={e}")
+        raise e 
 
     input_gdas = jtu.tree_map_with_path(partial(put_to_tpu_devices, sharding=self.tpu_sharding), out)
 
