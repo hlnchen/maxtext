@@ -295,6 +295,7 @@ def validate_model_name(s: str) -> bool:
       "gemma3-4b",
       "gemma3-12b",
       "gemma3-27b",
+      "qwen3-0.6b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",
