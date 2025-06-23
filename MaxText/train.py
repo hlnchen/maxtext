@@ -36,7 +36,6 @@ import pathwaysutils  # pylint: disable=unused-import
 import tensorflow as tf
 
 from jax import random
-from jax.experimental import checkify
 from jax.sharding import Mesh
 import jax
 import jax.numpy as jnp
@@ -62,6 +61,7 @@ from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import profiler
 from MaxText import pyconfig
+from MaxText.data_loader import DataLoader
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.globals import DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE, EPS
 from MaxText.layers import quantizations
@@ -109,15 +109,6 @@ def validate_train_config(config):
 
 def get_first_step(state):
   return int(state.step)
-
-
-def load_next_batch(train_iter, example_batch, config):
-  """Loads the next batch. Can keep reusing the same batch for performance reasons"""
-
-  if config.reuse_example_batch and example_batch is not None:
-    return example_batch
-  else:
-    return next(train_iter)
 
 
 def save_checkpoint(
@@ -552,15 +543,6 @@ def eval_step(model, config, state, data, dropout_rng):
   return metrics
 
 
-def check_example_batch(config, example_batch):
-  if config.max_checkify:
-    jittable_f = checkify.checkify(lambda x: checkify.check(jnp.any(x > -1), "Batch contains bad synthetic data!"))
-    # Check if inputs in batch contains bad synthetic data.
-    # pylint: disable=not-callable
-    err, _ = jax.jit(jittable_f)(example_batch["inputs"][: config.global_batch_size_to_train_on, :])
-    err.throw()
-
-
 def setup_mesh_and_model(config, devices=None):
   """Set up the mesh and the model for training
 
@@ -789,8 +771,7 @@ def train_loop(config, recorder, state=None):
 
   example_batch = None
 
-  input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
-
+  data_loader = DataLoader(config, mesh, data_iterator, recorder)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard
@@ -801,16 +782,7 @@ def train_loop(config, recorder, state=None):
     prof.maybe_activate_profiler(step, state)
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
-      with maybe_record_goodput(recorder, GoodputEvent.DATA_LOADING):
-        try:
-          example_batch = load_next_batch(data_iterator, example_batch, config)
-          # Reshard data from loaded sharding to performant activation sharding
-          example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
-        except Exception as e:  # pylint: disable=broad-except
-          max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
-          break
-
-      check_example_batch(config, example_batch=example_batch)
+      example_batch = data_loader.load_next_batch()
       # pylint: disable=not-callable
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       with maybe_record_goodput(recorder, GoodputEvent.STEP, step):

@@ -57,17 +57,15 @@ from MaxText import maxtext_utils
 from MaxText import profiler
 from MaxText import pyconfig
 from MaxText.common_types import Array
+from MaxText.data_loader import DataLoader
 from MaxText.experimental.rl import grpo_input_pipeline
-from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
 from MaxText.globals import EPS
 from MaxText.layers import models
 from MaxText.metric_logger import MetricLogger
 from MaxText.train import (
     validate_train_config,
     get_first_step,
-    load_next_batch,
     save_checkpoint,
-    check_example_batch,
     setup_mesh_and_model,
 )
 from MaxText.utils.goodput_utils import (
@@ -765,8 +763,7 @@ def train_loop(config, config_inference, recorder, state=None):
 
   example_batch = None
 
-  input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
-
+  data_loader = DataLoader(config, mesh, data_iterator, recorder)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard
@@ -777,15 +774,7 @@ def train_loop(config, config_inference, recorder, state=None):
     prof.maybe_activate_profiler(step, state)
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
-      with maybe_record_goodput(recorder, GoodputEvent.DATA_LOADING):
-        try:
-          example_batch = load_next_batch(data_iterator, example_batch, config)
-          example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
-        except Exception as e:  # pylint: disable=broad-except
-          max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
-          break
-
-      check_example_batch(config, example_batch=example_batch)
+      example_batch = data_loader.load_next_batch()
       # pylint: disable=not-callable
       rng = jax.jit(jax.random.fold_in)(init_rng, step)
       with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
