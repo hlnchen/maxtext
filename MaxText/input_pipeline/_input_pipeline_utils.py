@@ -126,7 +126,7 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
   prompt = None
   try:
     for message in example[data_column_name]:
-      if message["role"] == "user":
+      if message["role"] == "user" or message["role"] == "system":
         prompt = message
         prompt_in_chat_template = tokenizer_model.apply_chat_template([prompt], add_generation_prompt=False, tokenize=False)
         messages.append(prompt_in_chat_template)
@@ -153,10 +153,10 @@ def tokenization(example, hf_tokenizer, truncation, max_length, column_names):
   for column_name in column_names:
     if isinstance(example[column_name], list):
       example[column_name] = [
-          hf_tokenizer(x, truncation=truncation, max_length=max_length)["input_ids"] for x in example[column_name]
+          hf_tokenizer(x, truncation=truncation, max_length=max_length, add_special_tokens=False)["input_ids"] for x in example[column_name]
       ]
     elif isinstance(example[column_name], str):
-      example[column_name] = hf_tokenizer(example[column_name], truncation=truncation, max_length=max_length)["input_ids"]
+      example[column_name] = hf_tokenizer(example[column_name], truncation=truncation, max_length=max_length, add_special_tokens=False)["input_ids"]
   return example
 
 

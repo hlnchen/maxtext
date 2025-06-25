@@ -67,8 +67,11 @@ class DecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
+    if model_mode == MODEL_MODE_PREFILL:
+      inputs = nn.with_logical_constraint(inputs, ("activation_batch", "prefill_activation_length", "activation_embed"))
+    else:
+      inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
 
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = RMSNorm(
@@ -78,7 +81,10 @@ class DecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=("norm",),
     )(inputs)
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
+    if model_mode == MODEL_MODE_PREFILL:
+      lnx = nn.with_logical_constraint(lnx, ("activation_batch", "prefill_activation_length", "activation_embed"))
+    else:
+      lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
 
     attention_layer = Attention(
         config=self.config,
@@ -112,7 +118,14 @@ class DecoderLayer(nn.Module):
         model_mode=model_mode,
     )
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    if model_mode == MODEL_MODE_PREFILL:
+      attention_lnx = nn.with_logical_constraint(
+          attention_lnx, ("activation_batch", "prefill_activation_length", "activation_embed")
+      )
+    else:
+      attention_lnx = nn.with_logical_constraint(
+          attention_lnx, ("activation_batch", "activation_length", "activation_embed")
+      )
 
     # MLP block.
     mlp_lnx = linears.MlpBlock(
@@ -122,10 +135,14 @@ class DecoderLayer(nn.Module):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="mlp",
+        model_mode=model_mode,
         config=cfg,
         quant=self.quant,
     )(lnx, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    if model_mode == MODEL_MODE_PREFILL:
+      mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "prefill_activation_length", "activation_embed"))
+    else:
+      mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
 
     next_layer_addition = mlp_lnx + attention_lnx
 
@@ -134,10 +151,16 @@ class DecoderLayer(nn.Module):
     )
 
     layer_output = next_layer_addition_dropped_out + inputs
-    layer_output = nn.with_logical_constraint(
-        layer_output,
-        ("activation_batch", "activation_length", "activation_embed"),
-    )
+    if model_mode == MODEL_MODE_PREFILL:
+      layer_output = nn.with_logical_constraint(
+          layer_output,
+          ("activation_batch", "prefill_activation_length", "activation_embed"),
+      )
+    else:
+      layer_output = nn.with_logical_constraint(
+          layer_output,
+          ("activation_batch", "activation_length", "activation_embed"),
+      )
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
@@ -466,11 +489,11 @@ class Decoder(nn.Module):
     assert decoder_input_tokens.ndim == 2  # [batch, len]
 
     # [batch, length] -> [batch, length, emb_dim]
-    y = self.shared_embedding(decoder_input_tokens.astype("int32"))
+    y = self.shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
 
     # Merge the image embeddings with the text embeddings for multimodal models
     if image_embeddings is not None and cfg.use_multimodal:
-      if cfg.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b", "llama4-17b-16e", "llama4-17b-128e"]:
+      if cfg.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
         y = multimodal_utils.merge_mm_embeddings(
             text_embeddings=y,
             vision_embeddings=image_embeddings,
@@ -494,7 +517,7 @@ class Decoder(nn.Module):
           embedding_init=nn.initializers.normal(stddev=1.0),
           name="position_embedder",
           config=cfg,
-      )(decoder_positions)
+      )(decoder_positions, model_mode=model_mode)
 
     policy = self.get_remat_policy()
     RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, policy)
@@ -552,13 +575,8 @@ class Decoder(nn.Module):
       if cfg.scan_layers:
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
           assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
-          layer_call_kwargs = {
-              "page_state": page_state,
-              "previous_chunk": previous_chunk,
-              "slot": slot,
-          }
           dense_layer = RemattedBlockLayers[0]
-          dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
+          moe_layer = RemattedBlockLayers[1]
           y, _ = self.scan_decoder_layers(cfg, dense_layer, cfg.first_num_dense_layers, "dense_layers", mesh)(
               y,
               decoder_segment_ids,
@@ -566,8 +584,6 @@ class Decoder(nn.Module):
               deterministic,
               model_mode,
           )
-          moe_layer = RemattedBlockLayers[1]
-          moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
           num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
           y, _ = self.scan_decoder_layers(cfg, moe_layer, num_moe_layers, "moe_layers", mesh)(
               y,
@@ -673,9 +689,7 @@ class Decoder(nn.Module):
           inputs_shape=y.shape,
           out_features_shape=cfg.vocab_size,
           weight_dtype=cfg.weight_dtype,
-          dtype=jnp.float32
-          if cfg.logits_dot_in_fp32
-          else cfg.dtype,  # for logit training stability
+          dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
           kernel_axes=("embed", "vocab"),
           name="logits_dense",
           matmul_precision=self.config.matmul_precision,
@@ -714,7 +728,8 @@ class VisionEncoder(nn.Module):
     elif self.config.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
       from MaxText.layers import llama4  # pylint: disable=import-outside-toplevel
 
-      return [llama4.Llama4VisionModel, llama4.Llama4MultiModalProjector]
+      # TODO(hengtaoguo): return [llama4.Llama4VisionModel, llama4.Llama4MultiModalProjector] once ready
+      return [llama4.Llama4VisionEncoderLayer]
     else:
       raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
 
@@ -734,7 +749,7 @@ class VisionEncoder(nn.Module):
 
 
 class Transformer(nn.Module):
-  """An autoregressive transformer model."""
+  """An decoder-only Transformer model."""
 
   # Make new attributes required, so that all Transformer dependencies (train, decode, compile, etc) will error instead
   #   of silently use defaults.
@@ -790,13 +805,12 @@ class Transformer(nn.Module):
 
     bidirectional_mask = None
     image_embeddings = None
-    if self.config.use_multimodal and encoder_images is not None:
+    # TODO(hengtaoguo): Here we temporarily skip multimodal support for Llama4 models because of WIP
+    if self.config.use_multimodal and encoder_images is not None and not self.config.model_name.startswith("llama4"):
       image_embeddings = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
 
       if self.config.decoder_block == DecoderBlockType.GEMMA3:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
-      elif self.config.decoder_block == DecoderBlockType.LLAMA4:
-        bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
 
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
@@ -811,4 +825,3 @@ class Transformer(nn.Module):
         image_embeddings=image_embeddings,
     )
     return logits
-  

@@ -45,6 +45,13 @@ from tensorboardX import writer
 
 from MaxText import max_logging
 
+# Try to import wandb, but don't fail if it's not available
+try:
+  import wandb
+  WANDB_AVAILABLE = True
+except ImportError:
+  WANDB_AVAILABLE = False
+  wandb = None
 
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
@@ -119,6 +126,50 @@ def add_text_to_summary_writer(key, value, summary_writer):
   """Writes given key-value pair to tensorboard as text/summary."""
   if jax.process_index() == 0:
     summary_writer.add_text(key, value)
+
+
+def initialize_wandb_run(config):
+  """Initialize a Weights & Biases run."""
+  if not WANDB_AVAILABLE or wandb is None:
+    max_logging.log("Weights & Biases not available. Install with: pip install wandb")
+    return None
+  
+  if jax.process_index() == 0:
+    try:
+      # Initialize wandb with project and run name
+      wandb_run = wandb.init(
+          project=getattr(config, 'project_name', "maxtext"),
+          name=config.run_name,
+          config=config.get_keys() if hasattr(config, 'get_keys') else {},
+          tags=getattr(config, 'wandb_tags', None),
+          notes=getattr(config, 'wandb_notes', None),
+          resume="allow" if getattr(config, 'wandb_resume', False) else None,
+      )
+      max_logging.log(f"Initialized Weights & Biases run: {wandb_run.name}")
+      return wandb_run
+    except Exception as e:
+      max_logging.log(f"Failed to initialize Weights & Biases: {e}")
+      return None
+  return None
+
+
+def close_wandb_run(wandb_run):
+  """Close the Weights & Biases run."""
+  if jax.process_index() == 0 and wandb_run is not None and WANDB_AVAILABLE and wandb is not None:
+    try:
+      wandb_run.finish()
+      max_logging.log("Weights & Biases run finished")
+    except Exception as e:
+      max_logging.log(f"Error finishing Weights & Biases run: {e}")
+
+
+# def add_text_to_wandb(key, value, wandb_run):
+#   """Writes given key-value pair to Weights & Biases as text."""
+#   if jax.process_index() == 0 and wandb_run is not None and WANDB_AVAILABLE and wandb is not None:
+#     try:
+#       wandb_run.log({key: wandb.Table(data=[[value]], columns=[key])})
+#     except Exception as e:
+#       max_logging.log(f"Error logging text to Weights & Biases: {e}")
 
 
 def maybe_initialize_jax_distributed_system(raw_keys):
@@ -804,7 +855,7 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
     third_pair = [2 * cp_size - 1 - 4 * r for r in range(half)]  # [2*cp_size-1, 2*cp_size-5, …]
     fourth_pair = [i - 2 for i in third_pair]  # [2*cp_size-3, 2*cp_size-7, …]
 
-    # Concatenate so each rank’s two indices sit next to each other:
+    # Concatenate so each rank's two indices sit next to each other:
     # e.g. [0,2, 4,6, …, (2cp‑1),(2cp‑3), …]
     first_block = first_pair + third_pair
     second_block = second_pair + fourth_pair
