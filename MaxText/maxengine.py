@@ -21,15 +21,11 @@ import os.path
 import uuid
 import warnings
 
-from jax.experimental.layout import Format
+from jax.experimental.layout import DeviceLocalLayout as DLL
+from jax.experimental.layout import Layout
 from jax.sharding import PartitionSpec as P
 import jax
 import jax.numpy as jnp
-
-if jax.__version_info__ >= (0, 6, 3):
-  from jax.experimental.layout import Layout as DLL  # type: ignore
-else:
-  from jax.experimental.layout import DeviceLocalLayout as DLL  # type: ignore
 
 from flax import linen as nn
 from flax import struct
@@ -151,15 +147,15 @@ class MaxEngine(engine_api.Engine):
   ) -> tuple[Any, Any, Any, Any]:
     """Optimal memory layout for params and decode_state."""
 
-    param_layout = Format(DLL.AUTO)
-    decode_state_layout = Format(DLL.AUTO)
+    param_layout = Layout(DLL.AUTO)
+    decode_state_layout = Layout(DLL.AUTO)
     # Keyword arguments are not yet supported in JAX for specifying shardings. Therefore, all AOT
     # compiled functions use arguments instead.
     compiled_generate = (
         jax.jit(
             self.generate_aot,
             in_shardings=(param_layout, decode_state_layout, None),
-            out_shardings=(Format(DLL.AUTO), Format(DLL.AUTO)),
+            out_shardings=(Layout(DLL.AUTO), Layout(DLL.AUTO)),
             donate_argnames=("decode_state",),
         ).lower(params, decode_state, rng_shape)
     ).compile(compiler_options=xla_flags)
@@ -181,13 +177,8 @@ class MaxEngine(engine_api.Engine):
       if x.format == l:
         return x
       # Somehow this can be None sometimes.
-      dll = (l.layout if jax.__version_info__ >= (0, 6, 3) else
-             l.device_local_layout) if isinstance(l, Format) else l
-      f = (
-          jax.jit(self._identity, out_shardings=Format(dll, s))
-          .lower(x)
-          .compile(compiler_options=xla_flags)
-      )
+      dll = l.device_local_layout if isinstance(l, Layout) else l
+      f = jax.jit(self._identity, out_shardings=Layout(dll, s)).lower(x).compile(compiler_options=xla_flags)
       y = f(x)
       # Achieves donation of the input argument, but allows for different memory
       # layouts and shapes.
@@ -334,7 +325,13 @@ class MaxEngine(engine_api.Engine):
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           encoder_images=jnp.ones(
-              maxtext_utils.get_dummy_image_shape_for_init(self.config),
+              (
+                  1,
+                  maxtext_utils.NUM_IMAGES_PER_SEQUENCE,
+                  self.config.image_size_for_vit,
+                  self.config.image_size_for_vit,
+                  maxtext_utils.NUM_IMAGE_CHANNELS,
+              ),
               dtype=jnp.float32,
           )
           if self.config.use_multimodal
@@ -449,12 +446,10 @@ class MaxEngine(engine_api.Engine):
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
 
-    input_images = None
-    if self.config.use_multimodal and images is not None:
-      if self.config.model_name.startswith("gemma3"):
-        input_images = images[jnp.newaxis, jnp.newaxis, ...]  # Add batch and sequence dimension [B, N, H, W, C]
-      elif self.config.model_name.startswith("llama4"):
-        input_images = images[jnp.newaxis, ...]  # Add batch dimension [B, T, C, H, W]
+    if self.config.use_multimodal:
+      input_images = images[jnp.newaxis, jnp.newaxis, ...]  # Add batch and sequence dimension [B, N, H, W, C]
+    else:
+      input_images = None
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
@@ -1370,7 +1365,15 @@ class MaxEngine(engine_api.Engine):
           (int(self.config.per_device_batch_size * jax.device_count()), 1),
           dtype=jnp.int32,
       )
-      dummy_image = jnp.ones(maxtext_utils.get_dummy_image_shape_for_init(self.config), dtype=jnp.int32)
+      dummy_image = jnp.ones(
+          (
+              int(self.config.per_device_batch_size * jax.device_count()),
+              maxtext_utils.NUM_IMAGES_PER_SEQUENCE,
+              self.config.image_size_for_vit,
+              self.config.image_size_for_vit,
+              maxtext_utils.NUM_IMAGE_CHANNELS,
+          ),
+      )
       _, cache = self.model.apply(
           abstract_params,
           x,

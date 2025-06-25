@@ -14,7 +14,6 @@
 
 """Attentions Layers."""
 
-import dataclasses
 import enum
 import functools
 from typing import Any, Optional, Tuple
@@ -35,7 +34,6 @@ import jax
 import jax.numpy as jnp
 
 from flax import linen as nn
-from flax import nnx
 from flax.linen import partitioning
 
 from MaxText import max_utils
@@ -252,79 +250,7 @@ def _make_bidirectional_block_mask(bidirectional_mask):
   return bidirectional_block_mask
 
 
-def attention_op_as_linen(
-    *,
-    config: Config,
-    mesh: Mesh,
-    attention_kernel: str,
-    max_target_length: int,
-    num_query_heads: int,
-    num_kv_heads: int,
-    float32_qk_product: bool = False,
-    max_prefill_predict_length: int = -1,
-    float32_logits: bool = False,
-    flash_axis_names_kv: AxisNames = (BATCH, HEAD, KV_LENGTH, D_KV),
-    flash_axis_names_q: AxisNames = (BATCH, HEAD, LENGTH, D_KV),
-    flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH),
-    prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
-    cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
-    cache_scale_logical_axis_names: AxisNames = (CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV),
-    ragged_qkv_axis_names: AxisNames = (CACHE_BATCH, CACHE_HEADS, CACHE_SEQUENCE, CACHE_KV),
-    ragged_lengths_names: AxisNames = (CACHE_BATCH,),
-    compute_axis_order: AxisIdxes = (0, 1, 2, 3),
-    key_axis_order: AxisIdxes = (2, 0, 1, 3),
-    reshape_q: bool = False,
-    dropout_rate: float = 0.0,
-    dtype: DType = jnp.float32,
-    quant: Optional[Quant] = None,
-    kv_quant: Optional[KVQuant] = None,
-    attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
-    attn_logits_soft_cap: float | None = None,
-    sliding_window_size: int | None = None,
-    chunk_attn_window_size: int | None = None,
-    use_ragged_attention: bool = False,
-    ragged_block_size: int = 256,
-):
-  """
-  Initializes the AttentionOp module and returns it as a Linen module.
-  """
-  return nnx.bridge.to_linen(
-    AttentionOp,
-    config=config,
-    mesh=mesh,
-    attention_kernel=attention_kernel,
-    max_target_length=max_target_length,
-    num_query_heads=num_query_heads,
-    num_kv_heads=num_kv_heads,
-    float32_qk_product=float32_qk_product,
-    max_prefill_predict_length=max_prefill_predict_length,
-    float32_logits=float32_logits,
-    flash_axis_names_kv=flash_axis_names_kv,
-    flash_axis_names_q=flash_axis_names_q,
-    flash_axis_names_splash_kernel=flash_axis_names_splash_kernel,
-    prefill_cache_logical_axis_names=prefill_cache_logical_axis_names,
-    cache_logical_axis_names=cache_logical_axis_names,
-    cache_scale_logical_axis_names=cache_scale_logical_axis_names,
-    ragged_qkv_axis_names=ragged_qkv_axis_names,
-    ragged_lengths_names=ragged_lengths_names,
-    compute_axis_order=compute_axis_order,
-    key_axis_order=key_axis_order,
-    reshape_q=reshape_q,
-    dropout_rate=dropout_rate,
-    dtype=dtype,
-    quant=quant,
-    kv_quant=kv_quant,
-    attention_type=attention_type,
-    attn_logits_soft_cap=attn_logits_soft_cap,
-    sliding_window_size=sliding_window_size,
-    chunk_attn_window_size=chunk_attn_window_size,
-    use_ragged_attention=use_ragged_attention,
-    ragged_block_size=ragged_block_size,
-  )
-
-
-@dataclasses.dataclass(repr=False)
-class AttentionOp(nnx.Module):
+class AttentionOp(nn.Module):
   """Attention operation"""
 
   config: Config
@@ -358,8 +284,6 @@ class AttentionOp(nnx.Module):
   chunk_attn_window_size: int | None = None
   use_ragged_attention: bool = False
   ragged_block_size: int = 256
-
-  rngs: nnx.Rngs = None # Not used in AttentionOp but passed in by nnx.bridge.to_linen
 
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
@@ -1232,6 +1156,7 @@ class AttentionOp(nnx.Module):
       attn_out += local_normalizer * local_out
     return attn_out
 
+  @nn.compact
   def __call__(
       self,
       query,
@@ -1298,29 +1223,19 @@ class AttentionOp(nnx.Module):
       return prefill_unnormalized_output / prefill_exponentials_sum
 
 
-@dataclasses.dataclass(repr=False)
-class L2Norm(nnx.Module):
+class L2Norm(nn.Module):
   """
   Implementation of L2Norm in JAX.
 
-  Args:
+  Attributes:
     eps: float, epsilon used for numerical stability (default value should be ok for most cases).
   """
-  eps: float = 1e-6
-  rngs: nnx.Rngs = None # Not used in L2Norm but passed in by nnx.bridge.to_linen
 
+  eps: float = 1e-6
+
+  @nn.compact
   def __call__(self, x):
     return x * jax.lax.rsqrt(jnp.mean(x**2, axis=-1, keepdims=True) + self.eps)
-
-
-def l2_norm_as_linen(self, eps: float = 1e-6):
-  """
-  Initializes the L2Norm module and returns it as a Linen module.
-
-  Args:
-    eps: float, epsilon used for numerical stability (default value should be ok for most cases).
-  """
-  return nnx.bridge.to_linen(L2Norm, eps)
 
 
 class Attention(nn.Module):
@@ -1416,7 +1331,7 @@ class Attention(nn.Module):
 
   def setup(self):
     """init with attention_op and possibly paged_attention_op"""
-    self.attention_op = attention_op_as_linen(
+    self.attention_op = AttentionOp(
         config=self.config,
         mesh=self.mesh,
         attention_kernel=self.attention_kernel,
@@ -1728,7 +1643,7 @@ class Attention(nn.Module):
       key = self.apply_rotary_embedding(key, name="key_rotary", inputs_positions=inputs_positions)
 
     if use_qk_norm and is_llama4_decoder_block:
-      l2_norm = l2_norm_as_linen(self.config.normalization_layer_epsilon)
+      l2_norm = L2Norm(self.config.normalization_layer_epsilon)
       query = l2_norm(query)
       key = l2_norm(key)
 
@@ -1906,30 +1821,6 @@ class MLA(Attention):
       mscale = 0.1 * self.mscale * jnp.log(self.rope_factor) + 1.0
       self.softmax_scale = self.softmax_scale * mscale * mscale
 
-    # Setup paged attention op
-    if self.config.attention == "paged":
-      # Set head_dim to the max of qk_head_dim and v_head_dim. The current paged
-      # attention kernel requires the head_dim to be the same for q, k, v.
-      head_dim = max(self.qk_head_dim, self.v_head_dim)
-      # Align head_dim to the pagedattn_head_dim_alignment if specified.
-      if self.config.pagedattn_head_dim_alignment > 0:
-        alignment = self.config.pagedattn_head_dim_alignment
-        head_dim = (head_dim + alignment - 1) // alignment * alignment
-      self.ds_paged_attention_op = paged_attention.PagedAttentionOp(
-          mesh=self.mesh,
-          num_pages=self.config.pagedattn_num_pages,
-          tokens_per_page=self.config.pagedattn_tokens_per_page,
-          max_pages_per_slot=(self.config.max_target_length + self.config.pagedattn_tokens_per_page - 1)
-          // self.config.pagedattn_tokens_per_page,
-          max_pages_per_prefill=(self.config.max_prefill_predict_length + self.config.pagedattn_tokens_per_page - 1)
-          // self.config.pagedattn_tokens_per_page,
-          pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
-          num_kv_heads=self.num_kv_heads,
-          kv_head_dim_size=head_dim,
-          dtype=self.dtype,
-          attn_logits_soft_cap=self.attn_logits_soft_cap,
-      )
-
   def mla_query_projection(self, inputs_q: Array, inputs_positions: Array, model_mode) -> Array:
     """Query projection for MLA, e.g. includes LoRA if q_lora_rank > 0."""
     if self.q_lora_rank == 0:
@@ -2016,7 +1907,7 @@ class MLA(Attention):
 
     key, value = self.mla_get_key_value(low_rank_main, key_rope, model_mode)
     cached_values = [None, None]
-    if self.config.attention != "paged" and model_mode != MODEL_MODE_TRAIN:
+    if model_mode != MODEL_MODE_TRAIN:
       if self.config.mla_naive_kvcache:
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
       else:
@@ -2065,14 +1956,7 @@ class MLA(Attention):
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
-    if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
-      unnormalized_out, _, exp_sum = self.ds_paged_attention_op(
-          query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
-      )
-      unnormalized_out = unnormalized_out[..., :self.v_head_dim]
-      out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
-    else:
-      out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)
+    out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)
     out = nn.with_logical_constraint(out, self.out_axis_names)
     out = self.out_projection(inputs_q.shape[-1], out)
     return out

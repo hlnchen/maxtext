@@ -52,7 +52,6 @@ OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 # Multimodal constants
 NUM_IMAGES_PER_SEQUENCE = 1
 NUM_IMAGE_CHANNELS = 3
-NUM_TILES_PER_IMAGE = 5  # Fake number of tiles for llama4, init purpose
 
 
 def get_input_data_sharding(config, mesh):
@@ -104,28 +103,6 @@ def get_shaped_batch(config):
   shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   return shaped_batch
-
-
-def get_dummy_image_shape_for_init(config):
-  """Return the shape of the dummy image for specific model's initialization."""
-  image_shape = ()
-  if config.model_name.startswith("gemma3"):
-    image_shape = (
-        config.micro_batch_size_to_train_on,
-        NUM_IMAGES_PER_SEQUENCE,
-        config.image_size_for_vit,
-        config.image_size_for_vit,
-        NUM_IMAGE_CHANNELS,
-    )
-  elif config.model_name.startswith("llama4"):
-    image_shape = (
-        config.micro_batch_size_to_train_on,
-        NUM_TILES_PER_IMAGE,
-        NUM_IMAGE_CHANNELS,
-        config.tile_size_for_vit,
-        config.tile_size_for_vit,
-    )
-  return image_shape
 
 
 def load_compiled(config, partial_train, state):
@@ -643,7 +620,13 @@ def init_initial_state(model, tx, config, is_training, key):
   Args: model, tx, config, is_training, key
   """
   input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-  image_shape = get_dummy_image_shape_for_init(config)
+  image_shape = (
+      config.micro_batch_size_to_train_on,
+      NUM_IMAGES_PER_SEQUENCE,
+      config.image_size_for_vit,
+      config.image_size_for_vit,
+      NUM_IMAGE_CHANNELS,
+  )
   model_vars = model.init(
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
@@ -826,7 +809,13 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optio
         config.global_batch_size_to_load,
         config.max_prefill_predict_length,
     )
-    image_shape = get_dummy_image_shape_for_init(config)
+    image_shape = (
+        config.global_batch_size_to_load,
+        NUM_IMAGES_PER_SEQUENCE,
+        config.image_size_for_vit,
+        config.image_size_for_vit,
+        NUM_IMAGE_CHANNELS,
+    )
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
@@ -856,7 +845,13 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[Page
         config.global_batch_size_to_load,
         1,
     )
-    image_shape = get_dummy_image_shape_for_init(config)
+    image_shape = (
+        config.global_batch_size_to_load,
+        NUM_IMAGES_PER_SEQUENCE,
+        config.image_size_for_vit,
+        config.image_size_for_vit,
+        NUM_IMAGE_CHANNELS,
+    )
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
@@ -897,6 +892,13 @@ def add_config_to_summary_writer(config, summary_writer):
   if jax.process_index() == 0:
     for key, value in config.get_keys().items():
       max_utils.add_text_to_summary_writer(key, str(value), summary_writer)
+
+
+# def add_config_to_wandb(config, wandb_run):
+#   """Writes config params to Weights & Biases"""
+#   if jax.process_index() == 0:
+#     for key, value in config.get_keys().items():
+#       max_utils.add_text_to_wandb(key, str(value), wandb_run)
 
 
 def logical_axis_rules_pp_act_as_dp(logical_rules):

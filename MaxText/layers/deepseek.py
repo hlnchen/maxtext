@@ -34,25 +34,13 @@ from MaxText.layers import models
 from MaxText.layers import moe
 from MaxText.layers import quantizations
 from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.inference import page_manager
 
 # -----------------------------------------
 # The Decoder Layer for DeepSeek v3
 # -----------------------------------------
 
 
-def self_attention_with_norm(
-    inputs,
-    cfg,
-    mesh,
-    quant,
-    decoder_segment_ids,
-    decoder_positions,
-    deterministic,
-    model_mode,
-    previous_chunk = None,
-    page_state: Optional[page_manager.PageState] = None,
-    slot: Optional[int] = None):
+def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, decoder_positions, deterministic, model_mode):
   """self-attention with normalization"""
   # Normalization
   lnx_rms = models.RMSNorm(
@@ -98,9 +86,6 @@ def self_attention_with_norm(
       decoder_segment_ids=decoder_segment_ids,
       deterministic=deterministic,
       model_mode=model_mode,
-      previous_chunk=previous_chunk,
-      page_state=page_state,
-      slot=slot,
   )
 
   attention_lnx = nn.with_logical_constraint(
@@ -154,26 +139,16 @@ class DeepSeekDenseLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
-      previous_chunk = None,
-      page_state: Optional[page_manager.PageState] = None,
-      slot: Optional[int] = None,
+      previous_chunk=None,
+      page_state=None,
+      slot=None,
   ):
     cfg = self.config
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     hidden_states, intermediate_inputs = self_attention_with_norm(
-        inputs,
-        cfg,
-        self.mesh,
-        self.quant,
-        decoder_segment_ids,
-        decoder_positions,
-        deterministic,
-        model_mode,
-        previous_chunk,
-        page_state,
-        slot,
+        inputs, cfg, self.mesh, self.quant, decoder_segment_ids, decoder_positions, deterministic, model_mode
     )
     mlp_lnx = linears.MlpBlock(
         intermediate_dim=cfg.mlp_dim,
@@ -214,26 +189,16 @@ class DeepSeekMoELayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
-      previous_chunk = None,
-      page_state: Optional[page_manager.PageState] = None,
-      slot: Optional[int] = None,
+      previous_chunk=None,
+      page_state=None,
+      slot=None,
   ):
     cfg = self.config
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     hidden_states, intermediate_inputs = self_attention_with_norm(
-        inputs,
-        self.config,
-        self.mesh,
-        self.quant,
-        decoder_segment_ids,
-        decoder_positions,
-        deterministic,
-        model_mode,
-        previous_chunk,
-        page_state,
-        slot,
+        inputs, self.config, self.mesh, self.quant, decoder_segment_ids, decoder_positions, deterministic, model_mode
     )
 
     # NOTE: the naming mismatch here is to ensure reverse compatibility with existing checkpoints.
