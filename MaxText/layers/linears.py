@@ -29,7 +29,7 @@ from flax import nnx
 import flax.linen as nn
 
 from MaxText import max_logging
-from MaxText.common_types import DecoderBlockType, DType, Array, Config
+from MaxText.common_types import MODEL_MODE_PREFILL, DecoderBlockType, DType, Array, Config
 from MaxText.layers import quantizations
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init
@@ -84,9 +84,7 @@ class DenseGeneral(nnx.Module):
       axis: Union[Iterable[int], int] = -1,
       weight_dtype: DType = jnp.float32,
       dtype: DType = jnp.float32,
-      kernel_init: NdInitializer = nd_dense_init(
-          1.0, "fan_in", "truncated_normal"
-      ),
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
       kernel_axes: Tuple[Optional[str], ...] = (),
       quant: Optional[Quant] = None,
       use_bias: bool = False,
@@ -218,9 +216,7 @@ def dense_general(
     axis: Union[Iterable[int], int] = -1,
     weight_dtype: DType = jnp.float32,
     dtype: DType = jnp.float32,
-    kernel_init: NdInitializer = nd_dense_init(
-        1.0, "fan_in", "truncated_normal"
-    ),
+    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
     kernel_axes: Tuple[Optional[str], ...] = (),
     quant: Optional[Quant] = None,
     use_bias: bool = False,
@@ -304,6 +300,7 @@ class MlpBlock(nn.Module):
   use_bias: bool = False
   use_pre_norm: bool = False
   quant: Optional[Quant] = None
+  model_mode: str = None
 
   def get_norm_layer(self):
     """get normalization layer."""
@@ -385,7 +382,12 @@ class MlpBlock(nn.Module):
     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
         x, deterministic=deterministic
     )  # Broadcast along length.
-    x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
+
+    if self.model_mode == MODEL_MODE_PREFILL:
+      x = nn.with_logical_constraint(x, ("activation_batch", "prefill_activation_length", "activation_mlp"))
+    else:
+      x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
+
     output = dense_general(
         inputs_shape=x.shape,
         out_features_shape=inputs.shape[-1],
@@ -401,4 +403,3 @@ class MlpBlock(nn.Module):
 
     output = checkpoint_name(output, "mlpwo")
     return output
-  
