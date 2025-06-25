@@ -183,7 +183,7 @@ class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disab
     )
 
 
-def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int) -> jax.Array:
+def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int, q_offset: int = 0) -> jax.Array:
   """Generates an explicit boolean mask for chunked causal attention.
 
   This function computes the full boolean mask array where True indicates
@@ -202,7 +202,7 @@ def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int)
     ValueError: If chunk_window_size is None or not positive.
   """
 
-  row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
+  row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0) + q_offset
   col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
   if chunk_size <= 0:
     raise ValueError("chunk_size must be positive")
@@ -388,6 +388,9 @@ class AttentionOp(nn.Module):
       next_pos = previous_chunk.shape[1]
       if mask is not None:
         mask = mask[:, :, :, next_pos : next_pos + q_seq_len, :]
+    elif model_mode == MODEL_MODE_AUTOREGRESSIVE and q_seq_len == 1:
+      # In autoregression, the query position is the last position in the KV sequence.
+      next_pos = kv_seq_len - 1
 
     causal_mask = None
     # We enforce causality except for AUTOREGRESSION
@@ -409,20 +412,19 @@ class AttentionOp(nn.Module):
     elif causal_mask is not None:
       output_mask = causal_mask
 
-    is_seq_len_greater_than_chunk_window = False
-    if output_mask is not None and self.chunk_attn_window_size is not None:
-      is_seq_len_greater_than_chunk_window = output_mask.shape[-1] > self.chunk_attn_window_size
-
     if self.attention_type == AttentionType.LOCAL_SLIDING and output_mask is not None:
       if self.sliding_window_size is None:
         raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
 
-      all_ones = jnp.ones_like(output_mask)
-      sliding_mask = jnp.triu(all_ones, -1 * self.sliding_window_size + 1) * jnp.tril(all_ones, self.sliding_window_size - 1)
+      row_ids_sliding = jax.lax.broadcasted_iota(jnp.int32, (q_seq_len, 1), 0) + next_pos
+      col_ids_sliding = jax.lax.broadcasted_iota(jnp.int32, (1, kv_seq_len), 1)
+      sliding_mask = (col_ids_sliding > (row_ids_sliding - self.sliding_window_size)) & (col_ids_sliding <= row_ids_sliding)
       output_mask = sliding_mask * output_mask
-    elif self.attention_type == AttentionType.CHUNK and output_mask is not None and is_seq_len_greater_than_chunk_window:
+    elif self.attention_type == AttentionType.CHUNK and output_mask is not None:
       mask_shape = (q_seq_len, kv_seq_len)
-      chunk_mask = _generate_chunk_attention_mask(mask_shape=(q_seq_len, kv_seq_len), chunk_size=self.chunk_attn_window_size)
+      chunk_mask = _generate_chunk_attention_mask(
+          mask_shape=(q_seq_len, kv_seq_len), chunk_size=self.chunk_attn_window_size, q_offset=next_pos
+      )
       output_mask = chunk_mask * output_mask
 
     if bidirectional_mask is not None:
@@ -1389,7 +1391,7 @@ class Attention(nn.Module):
     )
     query_proj = dense_general(
         inputs_shape=inputs_q.shape,
-        features=(self.num_query_heads, self.head_dim),
+        out_features_shape=(self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=query_init,
         kernel_axes=kernel_axes,
@@ -1427,7 +1429,7 @@ class Attention(nn.Module):
 
     kv_proj = dense_general(
         inputs_shape=inputs_kv.shape,
-        features=(self.num_kv_heads, self.head_dim),
+        out_features_shape=(self.num_kv_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=kernel_axes,
@@ -1445,7 +1447,7 @@ class Attention(nn.Module):
 
     qkv_proj = dense_general(
         inputs_shape=inputs.shape,
-        features=(3, self.num_query_heads, self.head_dim),
+        out_features_shape=(3, self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=("embed", "qkv", "heads", "kv"),
@@ -1467,7 +1469,7 @@ class Attention(nn.Module):
     )
     out_proj = dense_general(
         inputs_shape=out.shape,
-        features=output_dim,
+        out_features_shape=output_dim,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
         kernel_axes=out_kernel_axis,  # trade speed with memory
@@ -1739,8 +1741,8 @@ class MLA(Attention):
     if self.q_lora_rank == 0:
       # Standard Q projection (without LoRA).
       self.query_proj = dense_general(
-          in_features=self.config.emb_dim,
-          features=(self.num_query_heads, self.qk_head_dim),
+          in_features_shape=self.config.emb_dim,
+          out_features_shape=(self.num_query_heads, self.qk_head_dim),
           axis=-1,
           kernel_init=self.kernel_init,
           kernel_axes=("embed", "q_heads", "kv"),
@@ -1753,8 +1755,8 @@ class MLA(Attention):
     else:
       # LoRA path for Q.
       self.wq_a = dense_general(
-          in_features=self.config.emb_dim,
-          features=self.q_lora_rank,
+          in_features_shape=self.config.emb_dim,
+          out_features_shape=self.q_lora_rank,
           axis=-1,
           kernel_init=self.kernel_init,
           kernel_axes=("embed", "q_lora"),
@@ -1772,8 +1774,8 @@ class MLA(Attention):
           kernel_axes=("norm",),
       )
       self.wq_b = dense_general(
-          in_features=self.q_lora_rank,
-          features=(self.num_query_heads, self.qk_head_dim),
+          in_features_shape=self.q_lora_rank,
+          out_features_shape=(self.num_query_heads, self.qk_head_dim),
           axis=-1,
           kernel_init=self.kernel_init,
           kernel_axes=("q_lora", "q_heads", "kv"),
@@ -1786,8 +1788,8 @@ class MLA(Attention):
 
     # KV LoRA path.
     self.wkv_a = dense_general(
-        in_features=self.config.emb_dim,
-        features=self.kv_lora_rank + self.qk_rope_head_dim,
+        in_features_shape=self.config.emb_dim,
+        out_features_shape=self.kv_lora_rank + self.qk_rope_head_dim,
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=("embed", "kv_lora"),
@@ -1805,8 +1807,8 @@ class MLA(Attention):
         kernel_axes=("norm",),
     )
     self.wkv_b = dense_general(
-        in_features=self.kv_lora_rank,
-        features=(
+        in_features_shape=self.kv_lora_rank,
+        out_features_shape=(
             self.num_query_heads,
             (self.qk_nope_head_dim + self.v_head_dim),
         ),

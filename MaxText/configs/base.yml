@@ -128,10 +128,10 @@ mlp_activations: ["silu", "linear"]
 dropout_rate: 0.0
 logits_via_embedding: False
 normalize_embedding_logits: True  # whether to normlize pre-softmax logits if logits_via_embedding is true
-logits_dot_in_fp32: False  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
+logits_dot_in_fp32: True  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 cast_logits_to_fp32: True # whether to cast the logits to fp32. The higher precision is generally beneficial, but it can vary slightly.
-float32_qk_product: False # in dot_product attention, whether to cast to fp32 the inputs to qk product
-float32_logits: False # in dot_product attention, whether to cast to fp32 the inputs to softmax
+float32_qk_product: True # in dot_product attention, whether to cast to fp32 the inputs to qk product
+float32_logits: True # in dot_product attention, whether to cast to fp32 the inputs to softmax
 
 # mixture of experts (moe)
 num_experts: 1
@@ -440,6 +440,11 @@ hf_eval_split: ''
 hf_eval_files: ''
 hf_access_token: ''
 # for Grain input pipeline (dataset_type=grain)
+# Path to grain data files. Can be a single pattern or multiple patterns with weights.
+# For multiple patterns, use semicolon (;) to separate and colon (:) to specify weights.
+# Example: "path/to/data1.array_record*:0.3;path/to/data2.array_record*:0.7"
+# Note: When using multiple files (separated by ';'), only ArrayRecord format is supported.
+# For more details, see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#grain-input-pipeline
 grain_train_files: ''
 grain_eval_files: ''
 grain_file_type: 'arrayrecord' # arrayrecord or parquet
@@ -591,6 +596,13 @@ heartbeat_reporting_interval_in_seconds: 5
 report_performance_metric_for_gcp_monitoring: False
 
 enable_tensorboard: True
+
+# Weights & Biases (wandb) Configuration
+enable_wandb: True
+project_name: "multi-domain-SFT"
+wandb_tags: null
+wandb_notes: null
+wandb_resume: False
 
 # Vertex AI Tensorboard Configurations - https://github.com/google/maxtext/tree/main/getting_started/Use_Vertex_AI_Tensorboard.md
 # Set to True for GCE, False if running via XPK

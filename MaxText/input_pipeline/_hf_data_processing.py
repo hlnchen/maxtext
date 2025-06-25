@@ -28,9 +28,19 @@ import grain.python as grain
 
 import numpy as np
 
+from MaxText import max_logging
 from MaxText.input_pipeline import _input_pipeline_utils
 from MaxText import multihost_dataloading
 
+
+llama_chat_template = """
+{%- for message in messages %}
+    {{- '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n' }}
+    {{- message['content'] + '<|eot_id|>' }}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|start_header_id|>assistant<|end_header_id|>\n\n' }}
+{%- endif %}"""
 
 def preprocessing_pipeline(
     dataloading_host_index,
@@ -71,6 +81,11 @@ def preprocessing_pipeline(
       legacy=False,
       token=hf_access_token,
   )
+  if "llama" in tokenizer_path:
+    max_logging.log("=" * 80)
+    max_logging.log("Resetting chat template")
+    max_logging.log("=" * 80)
+    tokenizer.chat_template = llama_chat_template
 
   if use_sft:
     dataset = dataset.select_columns(data_column_names)
@@ -100,6 +115,9 @@ def preprocessing_pipeline(
         _input_pipeline_utils.apply_chat_template,
         fn_kwargs={"tokenizer_model": tokenizer, "data_column_name": data_column_names[0]},
     )
+    # print("=" * 80)
+    # print(dataset[0])
+    # raise ValueError("Stop here")
   else:
     dataset = dataset.select_columns(data_column_names)
 

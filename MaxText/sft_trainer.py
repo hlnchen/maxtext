@@ -66,6 +66,7 @@ def train_loop(config, recorder, state=None):
   (
       init_rng,
       writer,
+      wandb_run,
       checkpoint_manager,
       state_mesh_shardings,
       model,
@@ -100,10 +101,16 @@ def train_loop(config, recorder, state=None):
   per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(config)
   per_device_tokens = maxtext_utils.calculate_tokens_training_per_device(config)
 
-  # Write train config params, num model params, and XLA flags to tensorboard
-  max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
-  max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
-  maxtext_utils.add_config_to_summary_writer(config, writer)
+  # Write train config params, num model params, and XLA flags to logging systems
+  if config.enable_tensorboard:
+    max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
+    max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
+    maxtext_utils.add_config_to_summary_writer(config, writer)
+  
+  # if config.enable_wandb:
+  #   max_utils.add_text_to_wandb("num_model_parameters", str(num_model_parameters), wandb_run)
+  #   max_utils.add_text_to_wandb("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], wandb_run)
+  #   maxtext_utils.add_config_to_wandb(config, wandb_run)
 
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compiled_trainstep_file != "":
@@ -154,7 +161,7 @@ def train_loop(config, recorder, state=None):
       performance_metric_queue = queue.Queue()
       gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
 
-  metric_logger = MetricLogger(writer, config)
+  metric_logger = MetricLogger(writer, wandb_run, config)
   input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
@@ -257,11 +264,14 @@ def train_loop(config, recorder, state=None):
         ):
           checkpointing.print_save_message(int(state.step) - 1, config.async_checkpointing)
       except Exception:  # pylint: disable=broad-except
-        max_logging.log(f"Checkpoint already saved for step {int(state.step)-1}.")
+        max_logging.log(f"Checkpoint is already saved for step {int(state.step)-1}.")
 
     checkpoint_manager.wait_until_finished()
   metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
-  max_utils.close_summary_writer(writer)
+  if config.enable_tensorboard:
+    max_utils.close_summary_writer(writer)
+  if config.enable_wandb:
+    max_utils.close_wandb_run(wandb_run)
 
   if example_batch:
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):

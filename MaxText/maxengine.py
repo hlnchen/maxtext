@@ -160,8 +160,8 @@ class MaxEngine(engine_api.Engine):
         ).lower(params, decode_state, rng_shape)
     ).compile(compiler_options=xla_flags)
 
-    arg_layouts, _ = compiled_generate.input_layouts
-    generate_out_layouts, _ = compiled_generate.output_layouts
+    arg_layouts, _ = compiled_generate.input_formats
+    generate_out_layouts, _ = compiled_generate.output_formats
 
     return compiled_generate, arg_layouts[0], arg_layouts[1], generate_out_layouts
 
@@ -174,7 +174,7 @@ class MaxEngine(engine_api.Engine):
     """Lays out an array tensor by tensor to prevent OOMs."""
 
     def _layout(x, s, l):
-      if x.layout == l:
+      if x.format == l:
         return x
       # Somehow this can be None sometimes.
       dll = l.device_local_layout if isinstance(l, Layout) else l

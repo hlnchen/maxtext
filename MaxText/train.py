@@ -395,6 +395,26 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       rngs={"dropout": rng1, "params": aqt_rng},
       mutable="intermediates",
   )
+
+  # N = 200
+  # jax.debug.print("inputs: {x}", x=data["inputs"][0,:N])
+  # # gather the logits with next token
+  # _logits = logits[0,:N,:]
+  # _next_token = data["inputs"][0,1:N+1]
+  # print(f"logits.shape: {_logits.shape}, logits.dtype: {_logits.dtype}, logits[10,_next_token[10]]: {_logits[10,_next_token[10]].dtype}")
+  # jax.debug.print("next_token: {x}", x=_next_token)
+  # _logits_on_next_token = jnp.take_along_axis(_logits, _next_token[:, None], axis=-1).squeeze(-1)
+  # # _logits_on_next_token_2 = _logits[jnp.arange(N), _next_token]
+  # jax.debug.print("logits_on_next_token: {x}, {y}", x=_logits_on_next_token, y=_logits_on_next_token.dtype)
+  # jax.debug.print("logits_on_next_token[9]: {x}, {y}", x=_logits[9,_next_token[9]], y=_logits_on_next_token[9])
+
+  # logits_sum = jax.scipy.special.logsumexp(_logits, axis=-1, keepdims=False)
+  # log_softmax = _logits_on_next_token - logits_sum
+  # jax.debug.print("log softmax: {x}", x=log_softmax)
+
+  # # raise RuntimeError("===========Stop here===========")
+
+
   one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
   xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
   xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
@@ -585,6 +605,7 @@ def setup_mesh_and_model(config, devices=None):
   Returns:
     init_rng: RNG key
     writer: Summary writer for tensorboard
+    wandb_run: Weights & Biases run
     checkpoint_manager: Orbax checkpointer
     state_mesh_annotations: the mesh annotations for the train state
     model:
@@ -594,7 +615,12 @@ def setup_mesh_and_model(config, devices=None):
   """
 
   init_rng = random.PRNGKey(config.init_weights_seed)
-  writer = max_utils.initialize_summary_writer(config.tensorboard_dir, config.run_name)
+  if config.enable_wandb:
+    wandb_run = max_utils.initialize_wandb_run(config)
+    writer = None
+  else:
+    wandb_run = None
+    writer = max_utils.initialize_summary_writer(config.tensorboard_dir, config.run_name)
 
   # Mesh definition
   devices_array = maxtext_utils.create_device_mesh(config, devices)
@@ -641,7 +667,7 @@ def setup_mesh_and_model(config, devices=None):
         use_zarr3,
     )
 
-  return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
+  return init_rng, writer, wandb_run, checkpoint_manager, mesh, model, learning_rate_schedule, tx
 
 
 def setup_train_loop(config, recorder):
@@ -655,7 +681,7 @@ def setup_train_loop(config, recorder):
 
   Returns:
     init_rng:
-    writer: Summary writer for tensorboard
+    wandb_run: Weights & Biases run
     checkpoint_manager: Orbax checkpointer
     state_mesh_annotations: the mesh annotations for the train state
     model:
@@ -666,7 +692,7 @@ def setup_train_loop(config, recorder):
   """
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
-    init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+    init_rng, writer, wandb_run, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
@@ -724,6 +750,7 @@ def setup_train_loop(config, recorder):
   return (
       init_rng,
       writer,
+      wandb_run,
       checkpoint_manager,
       state_mesh_shardings,
       model,
@@ -740,6 +767,7 @@ def train_loop(config, recorder, state=None):
   (
       init_rng,
       writer,
+      wandb_run,
       checkpoint_manager,
       state_mesh_shardings,
       model,
@@ -780,10 +808,16 @@ def train_loop(config, recorder, state=None):
   per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(config)
   per_device_tokens = maxtext_utils.calculate_tokens_training_per_device(config)
 
-  # Write train config params, num model params, and XLA flags to tensorboard
-  max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
-  max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
-  maxtext_utils.add_config_to_summary_writer(config, writer)
+  # Write train config params, num model params, and XLA flags to logging systems
+  if config.enable_tensorboard:
+    max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
+    max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
+    maxtext_utils.add_config_to_summary_writer(config, writer)
+  
+  # if config.enable_wandb:
+  #   max_utils.add_text_to_wandb("num_model_parameters", str(num_model_parameters), wandb_run)
+  #   max_utils.add_text_to_wandb("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], wandb_run)
+  #   maxtext_utils.add_config_to_wandb(config, wandb_run)
 
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compiled_trainstep_file != "":
@@ -835,7 +869,7 @@ def train_loop(config, recorder, state=None):
       performance_metric_queue = queue.Queue()
       gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
 
-  metric_logger = MetricLogger(writer, config)
+  metric_logger = MetricLogger(writer, wandb_run, config)
   input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
@@ -956,6 +990,7 @@ def train_loop(config, recorder, state=None):
     checkpoint_manager.wait_until_finished()
   metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
   max_utils.close_summary_writer(writer)
+  max_utils.close_wandb_run(wandb_run)
 
   if example_batch:
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):

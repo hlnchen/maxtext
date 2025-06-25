@@ -15,7 +15,7 @@ limitations under the License.
 """
 
 # pylint: disable=bare-except, consider-using-generator
-"""Logger that saves metrics to a local file, GCS and TensorBoard."""
+"""Logger that saves metrics to a local file, GCS, TensorBoard and Weights & Biases."""
 
 import json
 import os
@@ -38,13 +38,14 @@ def _prepare_metrics_for_json(metrics, step, run_name):
 
 class MetricLogger:
   """
-  Logger for saving metrics to a local file, GCS and TensorBoard.
+  Logger for saving metrics to a local file, GCS, TensorBoard and Weights & Biases.
   """
 
-  def __init__(self, writer, config):
+  def __init__(self, writer, wandb_run, config):
     self.buffered_step = None
     self.buffered_metrics = None
     self.writer = writer
+    self.wandb_run = wandb_run
     self.config = config
 
   def write_metrics(self, running_gcs_metrics, metrics, step, is_training=True):
@@ -72,6 +73,9 @@ class MetricLogger:
     if metrics_to_write:
       if self.config.enable_tensorboard:
         self.write_metrics_to_tensorboard(metrics_to_write, steps_to_write, is_training)
+
+      if self.config.enable_wandb:
+        self.write_metrics_to_wandb(metrics_to_write, steps_to_write, is_training)
 
       if self.config.metrics_file:
         self.write_metrics_locally(metrics_to_write, steps_to_write)
@@ -118,7 +122,7 @@ class MetricLogger:
 
   def write_metrics_to_tensorboard(self, metrics, step, is_training):
     """Writes metrics to TensorBoard"""
-    if jax.process_index() == 0:
+    if jax.process_index() == 0 and self.writer is not None:
       for metric_name in metrics.get("scalar", []):
         self.writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
       for metric_name in metrics.get("scalars", []):
@@ -129,4 +133,24 @@ class MetricLogger:
 
       if full_log and jax.process_index() == 0:
         max_logging.log(f"To see full metrics 'tensorboard --logdir={self.config.tensorboard_dir}'")
-        self.writer.flush()
+        if self.writer is not None:
+          self.writer.flush()
+
+  def write_metrics_to_wandb(self, metrics, step, is_training):
+    """Writes metrics to Weights & Biases"""
+    if jax.process_index() == 0 and self.wandb_run is not None:
+      # Log scalar metrics
+      for metric_name in metrics.get("scalar", []):
+        self.wandb_run.log({metric_name: np.array(metrics["scalar"][metric_name])}, step=step)
+      
+      # Log scalars metrics (if any)
+      for metric_name in metrics.get("scalars", []):
+        self.wandb_run.log({metric_name: metrics["scalars"][metric_name]}, step=step)
+
+    if is_training:
+      full_log = step % self.config.log_period == 0
+
+      if full_log and jax.process_index() == 0:
+        max_logging.log(f"Metrics logged to Weights & Biases run: {self.config.run_name}")
+        if self.wandb_run is not None:
+          self.wandb_run.log({}, step=step)  # Flush the logs
